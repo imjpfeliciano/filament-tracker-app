@@ -24,6 +24,10 @@ export function SharePage() {
   return (
     <div className="page page-share">
       <FilamentSheet items={result.items} title="Available filaments" />
+      <p className="viewer-footer">
+        <Link to="/">Open Filament Tracker</Link>
+        {' — '}create your own collection, or return to your inventory if you already have one.
+      </p>
     </div>
   )
 }
