@@ -2,6 +2,8 @@ import { deflateSync, inflateSync } from 'fflate'
 import {
   DEFAULT_FILAMENT_TYPE,
   DEFAULT_FILAMENT_VARIANT,
+  FILAMENT_TYPES,
+  FILAMENT_VARIANTS,
   type Filament,
   type ShareFilament,
 } from '../types/filament'
@@ -9,24 +11,16 @@ import { resolveType, resolveVariant } from './defaults'
 import { normalizeHex } from './hex'
 
 /**
- * v1 row (legacy): [brand, colorName, hex] | [brand, colorName, hex, type]
- * v2 row: [brand, colorName, hex, type, variant]
- * v3: deflated JSON { b: brands[], i: rows[] }
- *     row: [brandIdx, colorName, hexWithoutHash] |
- *          [brandIdx, colorName, hexWithoutHash, type] |
- *          [brandIdx, colorName, hexWithoutHash, type, variant]
- *     Empty type/variant mean defaults (PLA / Basic).
+ * Compact binary share format (deflated, base64url as `f1.<payload>`):
+ * brands: u8 count + length-prefixed utf8 strings
+ * items: u16 count + for each:
+ *   brandIdx u8, name (u8 len + utf8), rgb 3 bytes,
+ *   typeCode u8, variantCode u8
+ *     0x00.. = index into known FILAMENT_TYPES / FILAMENT_VARIANTS
+ *     0xFF = custom string follows (u8 len + utf8)
  */
-type ShareRowV1 = [string, string, string] | [string, string, string, string]
-type ShareRowV2 = [string, string, string, string, string]
-type ShareRowV3 =
-  | [number, string, string]
-  | [number, string, string, string]
-  | [number, string, string, string, string]
 
-type SharePayloadV1 = { v: 1; i: ShareRowV1[] }
-type SharePayloadV2 = { v: 2; i: ShareRowV2[] }
-type SharePayloadV3 = { b: string[]; i: ShareRowV3[] }
+const CUSTOM = 0xff
 
 function toBase64Url(bytes: Uint8Array): string {
   let binary = ''
@@ -56,6 +50,70 @@ function dictionaryIndex(values: string[], map: Map<string, number>, value: stri
   return index
 }
 
+function knownIndex(list: readonly string[], value: string): number {
+  const idx = list.findIndex((item) => item.toLowerCase() === value.toLowerCase())
+  return idx >= 0 ? idx : -1
+}
+
+function writeString(parts: number[], value: string): void {
+  const bytes = new TextEncoder().encode(value)
+  if (bytes.length > 255) {
+    throw new Error('Share field too long')
+  }
+  parts.push(bytes.length, ...bytes)
+}
+
+function readString(bytes: Uint8Array, offset: { i: number }): string {
+  if (offset.i >= bytes.length) throw new Error('truncated')
+  const length = bytes[offset.i]
+  offset.i += 1
+  if (offset.i + length > bytes.length) throw new Error('truncated')
+  const value = new TextDecoder().decode(bytes.subarray(offset.i, offset.i + length))
+  offset.i += length
+  return value
+}
+
+function writeCodedString(parts: number[], value: string, known: readonly string[]): void {
+  const idx = knownIndex(known, value)
+  if (idx >= 0 && idx < CUSTOM) {
+    parts.push(idx)
+    return
+  }
+  parts.push(CUSTOM)
+  writeString(parts, value)
+}
+
+function readCodedString(
+  bytes: Uint8Array,
+  offset: { i: number },
+  known: readonly string[],
+  fallback: string,
+): string {
+  if (offset.i >= bytes.length) throw new Error('truncated')
+  const code = bytes[offset.i]
+  offset.i += 1
+  if (code === CUSTOM) {
+    const custom = readString(bytes, offset).trim()
+    return custom || fallback
+  }
+  if (code < known.length) return known[code]
+  return fallback
+}
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  const normalized = normalizeHex(hex)
+  if (!normalized) return null
+  return [
+    Number.parseInt(normalized.slice(1, 3), 16),
+    Number.parseInt(normalized.slice(3, 5), 16),
+    Number.parseInt(normalized.slice(5, 7), 16),
+  ]
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  return `#${[r, g, b].map((n) => n.toString(16).padStart(2, '0')).join('').toUpperCase()}`
+}
+
 export function toShareFilaments(filaments: Filament[]): ShareFilament[] {
   return filaments
     .filter((f) => f.available)
@@ -68,36 +126,93 @@ export function toShareFilaments(filaments: Filament[]): ShareFilament[] {
     }))
 }
 
-function buildCompactPayload(items: ShareFilament[]): SharePayloadV3 {
+function encodeBinary(items: ShareFilament[]): Uint8Array {
   const brands: string[] = []
   const brandMap = new Map<string, number>()
+  const parts: number[] = []
 
-  const rows: ShareRowV3[] = items.map((item) => {
-    const brandIdx = dictionaryIndex(brands, brandMap, item.brand.trim())
-    const colorName = item.colorName.trim()
-    const hex = (normalizeHex(item.hex) ?? item.hex).replace(/^#/, '')
-    const type = resolveType(item.type)
-    const variant = resolveVariant(item.variant)
+  for (const item of items) {
+    dictionaryIndex(brands, brandMap, item.brand.trim())
+  }
 
-    const isDefaultType = type === DEFAULT_FILAMENT_TYPE
-    const isDefaultVariant = variant === DEFAULT_FILAMENT_VARIANT
+  if (brands.length > 255 || items.length > 65535) {
+    throw new Error('Share payload too large')
+  }
 
-    if (isDefaultType && isDefaultVariant) {
-      return [brandIdx, colorName, hex]
+  parts.push(brands.length)
+  for (const brand of brands) {
+    writeString(parts, brand)
+  }
+
+  parts.push((items.length >> 8) & 0xff, items.length & 0xff)
+
+  for (const item of items) {
+    const brandIdx = brandMap.get(item.brand.trim())
+    const rgb = hexToRgb(item.hex)
+    if (brandIdx === undefined || !rgb) {
+      throw new Error('Invalid share item')
     }
-    if (isDefaultVariant) {
-      return [brandIdx, colorName, hex, isDefaultType ? '' : type]
-    }
-    return [brandIdx, colorName, hex, isDefaultType ? '' : type, variant]
-  })
 
-  return { b: brands, i: rows }
+    parts.push(brandIdx)
+    writeString(parts, item.colorName.trim())
+    parts.push(rgb[0], rgb[1], rgb[2])
+    writeCodedString(parts, resolveType(item.type), FILAMENT_TYPES)
+    writeCodedString(parts, resolveVariant(item.variant), FILAMENT_VARIANTS)
+  }
+
+  return Uint8Array.from(parts)
+}
+
+function decodeBinary(bytes: Uint8Array): ShareFilament[] {
+  const offset = { i: 0 }
+  if (offset.i >= bytes.length) throw new Error('truncated')
+
+  const brandCount = bytes[offset.i]
+  offset.i += 1
+  const brands: string[] = []
+  for (let i = 0; i < brandCount; i += 1) {
+    brands.push(readString(bytes, offset))
+  }
+
+  if (offset.i + 2 > bytes.length) throw new Error('truncated')
+  const itemCount = (bytes[offset.i] << 8) | bytes[offset.i + 1]
+  offset.i += 2
+
+  const items: ShareFilament[] = []
+  for (let i = 0; i < itemCount; i += 1) {
+    if (offset.i >= bytes.length) throw new Error('truncated')
+    const brandIdx = bytes[offset.i]
+    offset.i += 1
+    if (brandIdx >= brands.length) throw new Error('bad brand')
+
+    const colorName = readString(bytes, offset)
+    if (offset.i + 3 > bytes.length) throw new Error('truncated')
+    const r = bytes[offset.i]
+    const g = bytes[offset.i + 1]
+    const b = bytes[offset.i + 2]
+    offset.i += 3
+
+    const type = readCodedString(bytes, offset, FILAMENT_TYPES, DEFAULT_FILAMENT_TYPE)
+    const variant = readCodedString(bytes, offset, FILAMENT_VARIANTS, DEFAULT_FILAMENT_VARIANT)
+    const brand = brands[brandIdx]?.trim()
+    if (!brand) throw new Error('bad brand')
+
+    items.push({
+      brand,
+      colorName,
+      hex: rgbToHex(r, g, b),
+      type: resolveType(type),
+      variant: resolveVariant(variant),
+    })
+  }
+
+  return items
 }
 
 export function encodeSharePayload(items: ShareFilament[]): string {
-  const json = JSON.stringify(buildCompactPayload(items))
-  const compressed = deflateSync(new TextEncoder().encode(json), { level: 9 })
-  return `v3.${toBase64Url(compressed)}`
+  const packed = encodeBinary(items)
+  const compressed = deflateSync(packed, { level: 9 })
+  return `f1.${toBase64Url(compressed)}`
 }
 
 export function buildShareUrl(items: ShareFilament[], origin = window.location.origin): string {
@@ -109,146 +224,21 @@ export type DecodeResult =
   | { ok: true; items: ShareFilament[] }
   | { ok: false; error: string }
 
-function buildShareItem(
-  brand: string,
-  colorName: string,
-  hexRaw: string,
-  type?: string,
-  variant?: string,
-): ShareFilament | null {
-  if (typeof brand !== 'string' || typeof colorName !== 'string' || typeof hexRaw !== 'string') {
-    return null
-  }
-  const hex = normalizeHex(hexRaw.startsWith('#') ? hexRaw : `#${hexRaw}`)
-  if (!hex || !brand.trim()) return null
-
-  return {
-    brand: brand.trim(),
-    colorName: colorName.trim(),
-    hex,
-    type: resolveType(typeof type === 'string' ? type : undefined),
-    variant: resolveVariant(typeof variant === 'string' ? variant : undefined),
-  }
-}
-
-function parseShareRowV1(row: unknown): ShareFilament | null {
-  if (!Array.isArray(row) || (row.length !== 3 && row.length !== 4)) return null
-  const [brand, colorName, hexRaw, type] = row
-  return buildShareItem(
-    brand as string,
-    colorName as string,
-    hexRaw as string,
-    typeof type === 'string' ? type : undefined,
-  )
-}
-
-function parseShareRowV2(row: unknown): ShareFilament | null {
-  if (!Array.isArray(row) || row.length !== 5) return null
-  const [brand, colorName, hexRaw, type, variant] = row
-  if (
-    typeof brand !== 'string' ||
-    typeof colorName !== 'string' ||
-    typeof hexRaw !== 'string' ||
-    typeof type !== 'string' ||
-    typeof variant !== 'string'
-  ) {
-    return null
-  }
-  return buildShareItem(brand, colorName, hexRaw, type, variant)
-}
-
-function parseShareRowV3(row: unknown, brands: string[]): ShareFilament | null {
-  if (!Array.isArray(row) || row.length < 3 || row.length > 5) return null
-  const [brandIdx, colorName, hexRaw, type, variant] = row
-  if (typeof brandIdx !== 'number' || !Number.isInteger(brandIdx)) return null
-  if (brandIdx < 0 || brandIdx >= brands.length) return null
-  if (typeof colorName !== 'string' || typeof hexRaw !== 'string') return null
-  if (type !== undefined && typeof type !== 'string') return null
-  if (variant !== undefined && typeof variant !== 'string') return null
-
-  return buildShareItem(
-    brands[brandIdx],
-    colorName,
-    hexRaw,
-    type === '' ? DEFAULT_FILAMENT_TYPE : type,
-    variant === '' ? DEFAULT_FILAMENT_VARIANT : variant,
-  )
-}
-
-function parseLegacyJsonPayload(
-  version: 'v1' | 'v2',
-  bytes: Uint8Array,
-): DecodeResult {
-  const json = new TextDecoder().decode(bytes)
-  const parsed: unknown = JSON.parse(json)
-
-  if (!parsed || typeof parsed !== 'object') {
-    return { ok: false, error: 'This share link is invalid.' }
-  }
-
-  const payload = parsed as SharePayloadV1 | SharePayloadV2
-  if (!Array.isArray(payload.i)) {
-    return { ok: false, error: 'This share link is invalid.' }
-  }
-
-  const items: ShareFilament[] = []
-  for (const row of payload.i) {
-    const item = version === 'v2' ? parseShareRowV2(row) : parseShareRowV1(row)
-    if (!item) {
-      return { ok: false, error: 'This share link is invalid.' }
-    }
-    items.push(item)
-  }
-
-  return { ok: true, items }
-}
-
-function parseV3Payload(bytes: Uint8Array): DecodeResult {
-  const json = new TextDecoder().decode(inflateSync(bytes))
-  const parsed: unknown = JSON.parse(json)
-
-  if (!parsed || typeof parsed !== 'object') {
-    return { ok: false, error: 'This share link is invalid.' }
-  }
-
-  const payload = parsed as SharePayloadV3
-  if (!Array.isArray(payload.b) || !Array.isArray(payload.i)) {
-    return { ok: false, error: 'This share link is invalid.' }
-  }
-  if (!payload.b.every((brand) => typeof brand === 'string')) {
-    return { ok: false, error: 'This share link is invalid.' }
-  }
-
-  const items: ShareFilament[] = []
-  for (const row of payload.i) {
-    const item = parseShareRowV3(row, payload.b)
-    if (!item) {
-      return { ok: false, error: 'This share link is invalid.' }
-    }
-    items.push(item)
-  }
-
-  return { ok: true, items }
-}
-
 export function decodeShareHash(hash: string): DecodeResult {
   const raw = hash.startsWith('#') ? hash.slice(1) : hash
   if (!raw) {
     return { ok: false, error: 'This share link is invalid.' }
   }
 
-  const match = /^(v[123])\.(.+)$/.exec(raw)
+  const match = /^f1\.(.+)$/.exec(raw)
   if (!match) {
     return { ok: false, error: 'This share link is invalid.' }
   }
 
-  const version = match[1] as 'v1' | 'v2' | 'v3'
   try {
-    const bytes = fromBase64Url(match[2])
-    if (version === 'v3') {
-      return parseV3Payload(bytes)
-    }
-    return parseLegacyJsonPayload(version, bytes)
+    const compressed = fromBase64Url(match[1])
+    const items = decodeBinary(inflateSync(compressed))
+    return { ok: true, items }
   } catch {
     return { ok: false, error: 'This share link is invalid.' }
   }
