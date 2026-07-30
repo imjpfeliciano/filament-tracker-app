@@ -99,6 +99,15 @@ code,
   gap: 0.35rem;
 }
 
+.share-actions-block {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.page-share {
+  width: min(1100px, calc(100% - 2rem));
+}
+
 .workspace {
   display: grid;
   gap: 1.1rem;
@@ -570,13 +579,6 @@ input[type='color'] {
 
 .page:has(.swatch-grid):not(.page-workspace) {
   width: min(1100px, calc(100% - 2rem));
-}
-
-.viewer-footer {
-  margin: 1.5rem 0 0;
-  text-align: center;
-  color: var(--muted);
-  font-size: 0.95rem;
 }
 
 .error-panel {

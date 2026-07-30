@@ -5,7 +5,6 @@ import { decodeShareHash } from '../lib/share'
 
 export function SharePage() {
   const { hash } = useLocation()
-
   const result = useMemo(() => decodeShareHash(hash), [hash])
 
   if (!result.ok) {
@@ -23,15 +22,8 @@ export function SharePage() {
   }
 
   return (
-    <div className="page">
-      <FilamentSheet
-        items={result.items}
-        title="Available filaments"
-        subtitle="Shared snapshot — read only. Data comes from the link, not this browser’s inventory."
-      />
-      <p className="viewer-footer">
-        <Link to="/">Open Filament Tracker</Link> to manage your own colors locally.
-      </p>
+    <div className="page page-share">
+      <FilamentSheet items={result.items} title="Available filaments" />
     </div>
   )
 }

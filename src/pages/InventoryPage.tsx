@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { FilamentForm } from '../components/FilamentForm'
 import { FilamentList } from '../components/FilamentList'
 import { FilamentSheet } from '../components/FilamentSheet'
+import { ShareActions } from '../components/ShareActions'
 import { useFilaments } from '../hooks/useFilaments'
 import { downloadBackup, parseBackupJson } from '../lib/backup'
 import { buildShareUrl, encodeSharePayload, toShareFilaments } from '../lib/share'
@@ -18,7 +18,6 @@ export function InventoryPage() {
   } = useFilaments()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [showPreview, setShowPreview] = useState(false)
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const [backupMessage, setBackupMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(
     null,
   )
@@ -27,18 +26,8 @@ export function InventoryPage() {
   const editing = filaments.find((f) => f.id === editingId) ?? null
   const shareItems = useMemo(() => toShareFilaments(filaments), [filaments])
   const availableCount = shareItems.length
-
-  async function copyShareLink() {
-    const url = buildShareUrl(shareItems)
-    try {
-      await navigator.clipboard.writeText(url)
-      setCopyState('copied')
-      window.setTimeout(() => setCopyState('idle'), 2000)
-    } catch {
-      setCopyState('error')
-      window.setTimeout(() => setCopyState('idle'), 2500)
-    }
-  }
+  const shareUrl = useMemo(() => buildShareUrl(shareItems), [shareItems])
+  const shareHash = useMemo(() => encodeSharePayload(shareItems), [shareItems])
 
   function handleExport() {
     downloadBackup(filaments)
@@ -91,32 +80,20 @@ export function InventoryPage() {
           </div>
 
           <div className="header-toolbar">
-            <div className="toolbar-group" aria-label="Share">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => void copyShareLink()}
-                disabled={availableCount === 0}
-              >
-                {copyState === 'copied' ? 'Link copied' : 'Copy share link'}
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => setShowPreview((v) => !v)}
-                disabled={availableCount === 0}
-              >
-                {showPreview ? 'Hide preview' : 'Preview'}
-              </button>
-              {availableCount > 0 ? (
-                <Link
-                  className="btn btn-ghost"
-                  to={{ pathname: '/s', hash: encodeSharePayload(shareItems) }}
-                >
-                  Open share
-                </Link>
-              ) : null}
-            </div>
+            <ShareActions
+              url={shareUrl}
+              shareHash={shareHash}
+              disabled={availableCount === 0}
+            />
+
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => setShowPreview((v) => !v)}
+              disabled={availableCount === 0}
+            >
+              {showPreview ? 'Hide preview' : 'Preview'}
+            </button>
 
             <div className="toolbar-divider" aria-hidden="true" />
 
@@ -146,20 +123,13 @@ export function InventoryPage() {
           </div>
         </div>
 
-        {(copyState === 'error' || backupMessage) && (
+        {backupMessage ? (
           <div className="header-messages">
-            {copyState === 'error' ? (
-              <p className="form-error">
-                Could not copy — try opening the share view and copying the URL.
-              </p>
-            ) : null}
-            {backupMessage ? (
-              <p className={backupMessage.kind === 'error' ? 'form-error' : 'muted'}>
-                {backupMessage.text}
-              </p>
-            ) : null}
+            <p className={backupMessage.kind === 'error' ? 'form-error' : 'muted'}>
+              {backupMessage.text}
+            </p>
           </div>
-        )}
+        ) : null}
       </header>
 
       {showPreview && availableCount > 0 ? (
