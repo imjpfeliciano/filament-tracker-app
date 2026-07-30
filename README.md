@@ -25,6 +25,10 @@ npm run build
 npm run preview
 ```
 
+## Deploy (Vercel)
+
+`vercel.json` rewrites app routes like `/s` to `index.html` so shared links work on direct open / refresh (not only in-app navigation).
+
 ## Notes
 
 - Share links are snapshots. If you change inventory later, copy a new link.
